@@ -7,9 +7,17 @@ for extracurricular activities at Mergington High School.
 
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 import os
 from pathlib import Path
+import io
+import csv
+from typing import List
+try:
+    from fpdf import FPDF
+    FPDF_AVAILABLE = True
+except ImportError:
+    FPDF_AVAILABLE = False
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -130,3 +138,65 @@ def unregister_from_activity(activity_name: str, email: str):
     # Remove student
     activity["participants"].remove(email)
     return {"message": f"Unregistered {email} from {activity_name}"}
+
+# --- NUEVOS ENDPOINTS DE REPORTES ---
+
+@app.get("/reports")
+def get_reports():
+    """Genera un resumen de participación por actividad y usuario"""
+    report = []
+    for name, details in activities.items():
+        report.append({
+            "activity": name,
+            "participants_count": len(details["participants"]),
+            "max_participants": details["max_participants"],
+            "participants": details["participants"]
+        })
+    # Estadísticas globales
+    total_activities = len(activities)
+    total_participants = sum(len(a["participants"]) for a in activities.values())
+    unique_users = set(email for a in activities.values() for email in a["participants"])
+    return {
+        "summary": {
+            "total_activities": total_activities,
+            "total_participants": total_participants,
+            "unique_users": len(unique_users)
+        },
+        "activities": report
+    }
+
+@app.get("/reports/export")
+def export_reports(format: str = "csv"):
+    """Exporta el reporte de participación en formato CSV o PDF"""
+    report = get_reports()["activities"]
+    if format == "csv":
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["Activity", "Participants Count", "Max Participants", "Participants"])
+        for r in report:
+            writer.writerow([
+                r["activity"],
+                r["participants_count"],
+                r["max_participants"],
+                ", ".join(r["participants"])
+            ])
+        output.seek(0)
+        return StreamingResponse(output, media_type="text/csv", headers={"Content-Disposition": "attachment; filename=report.csv"})
+    elif format == "pdf":
+        if not FPDF_AVAILABLE:
+            raise HTTPException(status_code=500, detail="FPDF no está instalado. Instala con 'pip install fpdf'.")
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", size=12)
+        pdf.cell(200, 10, txt="Reporte de Participación", ln=True, align="C")
+        pdf.ln(10)
+        for r in report:
+            pdf.cell(0, 10, txt=f"Actividad: {r['activity']}", ln=True)
+            pdf.cell(0, 10, txt=f"Participantes: {r['participants_count']} / {r['max_participants']}", ln=True)
+            pdf.multi_cell(0, 10, txt=f"Lista: {', '.join(r['participants'])}")
+            pdf.ln(5)
+        pdf_output = io.BytesIO(pdf.output(dest='S').encode('latin1'))
+        pdf_output.seek(0)
+        return StreamingResponse(pdf_output, media_type="application/pdf", headers={"Content-Disposition": "attachment; filename=report.pdf"})
+    else:
+        raise HTTPException(status_code=400, detail="Formato no soportado. Usa 'csv' o 'pdf'.")
